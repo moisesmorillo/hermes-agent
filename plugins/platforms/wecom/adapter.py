@@ -107,6 +107,7 @@ class WeComAdapter(WeComStreamMixin, WeComMediaMixin, ChatSendQueueMixin, OwnAcc
     SUPPORTS_MESSAGE_EDITING = False
     SUPPORTS_NATIVE_STREAMING = True  # msgtype "stream" via aibot_respond_msg, not edit-based
     MAX_STREAM_CONTENT_LENGTH = MAX_STREAM_CONTENT_LENGTH
+    splits_long_messages = True  # _send_inner() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     _SPLIT_THRESHOLD = 3900  # chunks near the 4000-char client split are almost certainly continued
 
     def __init__(self, config: PlatformConfig):
@@ -601,7 +602,16 @@ class WeComAdapter(WeComStreamMixin, WeComMediaMixin, ChatSendQueueMixin, OwnAcc
         return await self._enqueue_chat_send(chat_id, lambda: self._send_inner(chat_id, content, reply_to, force_proactive=force_proactive), is_control=is_control)
 
     async def _send_inner(self, chat_id: str, content: str, reply_to: Optional[str] = None, *, force_proactive: bool = False) -> SendResult:
-        """Send under the per-chat queue; force_proactive skips passive reply except in groups."""
+        """Send under the per-chat queue, one markdown message per MAX_MESSAGE_LENGTH chunk; stops at the first failure."""
+        result = SendResult(success=False, error="nothing to send")
+        for chunk in self.truncate_message(content, self.MAX_MESSAGE_LENGTH):
+            result = await self._send_chunk(chat_id, chunk, reply_to, force_proactive=force_proactive)
+            if not result.success:
+                break
+        return result
+
+    async def _send_chunk(self, chat_id: str, content: str, reply_to: Optional[str] = None, *, force_proactive: bool = False) -> SendResult:
+        """Send one chunk; force_proactive skips passive reply except in groups."""
         try:
             reply_req_id = None if force_proactive and chat_id not in self._group_chat_ids else self._cached_reply_req_id(chat_id, reply_to)
             if reply_req_id:
